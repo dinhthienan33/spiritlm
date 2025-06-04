@@ -161,9 +161,11 @@ class SpiritLMTokenizer:
         style_rate=1,
         style_dedup=False,
         style_key="style",
-        expected_sample_rate=16_000,
-        max_wav_chunk=100 * 16_000,
-        min_wav_chunk=1280,  # 400 is minimum for hubert, 1280 (80ms) is minimum for pitch, so let's take 1280
+        target_sample_rate=None,  # Changed from expected_sample_rate, None means auto-detect
+        max_wav_chunk_seconds=6.25,  # Changed from samples to seconds for flexibility
+        min_wav_chunk_ms=80,  # Changed from samples to milliseconds for flexibility
+        auto_resample=True,  # New parameter to control automatic resampling
+        preferred_channel=None,  # New parameter for multi-channel handling
     ):
         super().__init__()
 
@@ -188,17 +190,34 @@ class SpiritLMTokenizer:
                 self.style_dedup = style_dedup
                 self.style_key = style_key
 
-        self.expected_sample_rate = expected_sample_rate
-        self.max_wav_chunk = max_wav_chunk
-        self.min_wav_chunk = min_wav_chunk
+        # Flexible audio handling parameters
+        self.target_sample_rate = target_sample_rate  # None means use original sample rate
+        self.max_wav_chunk_seconds = max_wav_chunk_seconds
+        self.min_wav_chunk_ms = min_wav_chunk_ms
+        self.auto_resample = auto_resample
+        self.preferred_channel = preferred_channel  # None, 0, 1, or 'average'
+
+    def _get_chunk_sizes(self, sample_rate):
+        """Calculate chunk sizes based on sample rate and time-based parameters."""
+        max_chunk = int(self.max_wav_chunk_seconds * sample_rate)
+        min_chunk = int(self.min_wav_chunk_ms * sample_rate / 1000)
+        return max_chunk, min_chunk
 
     def load_audio(self, path):
         wav, sr = torchaudio.load(path)
-        if sr != self.expected_sample_rate:
-            wav = torchaudio.functional.resample(
-                wav, orig_freq=sr, new_freq=self.expected_sample_rate
-            )
-        return wav
+        
+        # Handle sample rate
+        if self.target_sample_rate is not None and sr != self.target_sample_rate:
+            if self.auto_resample:
+                _logger.info(f"Resampling audio from {sr} Hz to {self.target_sample_rate} Hz")
+                wav = torchaudio.functional.resample(
+                    wav, orig_freq=sr, new_freq=self.target_sample_rate
+                )
+                sr = self.target_sample_rate
+            else:
+                _logger.warning(f"Audio sample rate {sr} Hz does not match target {self.target_sample_rate} Hz. Set auto_resample=True to automatically resample.")
+        
+        return wav, sr  # Return both wav and sample rate
 
     def encode_units(self, audio, channel_id=None):
         """
@@ -210,34 +229,64 @@ class SpiritLMTokenizer:
             'style': '7',
         }
         The audio can be the path to audio file or an array.
-        For stereo audio file, channel_id can be set (0 or 1).
+        For stereo audio file, channel_id can be set (0 or 1), or use preferred_channel from init.
         """
         units = {}
+        sample_rate = None
 
         if isinstance(audio, str):
             units["audio"] = os.path.abspath(audio)
-            audio = self.load_audio(audio)
-        audio = audio.squeeze()
-        if len(audio.shape) == 2:
-            assert (
-                audio.shape[0] == 2
-            ), f"expected a stereo wav of shape (2,x), found {audio.shape}"
-            if channel_id is None:
-                _logger.warning(
-                    "Found stereo audio input, averaging audio from 2 channels. If you want to extract"
-                    "only one channel, set channel_id to 0 or 1"
-                )
-                audio = audio.mean(0)
+            audio, sample_rate = self.load_audio(audio)
+        else:
+            # If audio is already loaded, we need to determine the sample rate
+            # Default to 16kHz if not specified and target_sample_rate is None
+            if self.target_sample_rate is not None:
+                sample_rate = self.target_sample_rate
             else:
-                audio = audio[channel_id]
-        assert len(audio.shape) == 1, audio.shape
+                sample_rate = 16000  # Fallback default
+                _logger.warning(f"Sample rate not provided for audio array. Using default {sample_rate} Hz. "
+                              "Consider setting target_sample_rate or passing sample rate information.")
+        
+        audio = audio.squeeze()
+        
+        # Handle multi-channel audio with improved logic
+        if len(audio.shape) == 2:
+            num_channels = audio.shape[0]
+            _logger.info(f"Found {num_channels}-channel audio with shape {audio.shape}")
+            
+            # Determine which channel to use
+            channel_to_use = channel_id if channel_id is not None else self.preferred_channel
+            
+            if channel_to_use is None:
+                # Default behavior: average all channels
+                _logger.info("Averaging all channels. Set channel_id or preferred_channel to select specific channel.")
+                audio = audio.mean(0)
+            elif channel_to_use == 'average':
+                _logger.info("Averaging all channels as requested.")
+                audio = audio.mean(0)
+            elif isinstance(channel_to_use, int):
+                if 0 <= channel_to_use < num_channels:
+                    _logger.info(f"Using channel {channel_to_use}")
+                    audio = audio[channel_to_use]
+                else:
+                    _logger.warning(f"Channel {channel_to_use} not available. Audio has {num_channels} channels. Averaging instead.")
+                    audio = audio.mean(0)
+            else:
+                _logger.warning(f"Invalid channel specification: {channel_to_use}. Averaging channels instead.")
+                audio = audio.mean(0)
+        
+        assert len(audio.shape) == 1, f"Expected 1D audio after processing, got shape {audio.shape}"
 
+        # Calculate chunk sizes based on actual sample rate
+        max_wav_chunk, min_wav_chunk = self._get_chunk_sizes(sample_rate)
+        
         hubert_units = []
         pitch_units = []
         style_units = []
-        for start in range(0, len(audio), self.max_wav_chunk):
-            audio_chunk = audio[start : start + self.max_wav_chunk]
-            if len(audio_chunk) < self.min_wav_chunk:
+        
+        for start in range(0, len(audio), max_wav_chunk):
+            audio_chunk = audio[start : start + max_wav_chunk]
+            if len(audio_chunk) < min_wav_chunk:
                 continue
             hubert_units.extend([str(i.item()) for i in self.hubert_model(audio_chunk)])
             if self.pitch_model is not None:
@@ -359,3 +408,62 @@ class SpiritLMTokenizer:
         )
 
         return wav
+
+    def encode_units_with_sr(self, audio, sample_rate, channel_id=None):
+        """
+        Get the speech units for audio array with explicit sample rate.
+        This is useful when you already have loaded audio and know its sample rate.
+        
+        Args:
+            audio: Audio tensor/array
+            sample_rate: Sample rate of the audio
+            channel_id: Channel to use for multi-channel audio (overrides preferred_channel)
+        """
+        # Store original target sample rate temporarily
+        original_target_sr = self.target_sample_rate
+        
+        # Handle resampling if needed
+        if self.target_sample_rate is not None and sample_rate != self.target_sample_rate:
+            if self.auto_resample:
+                _logger.info(f"Resampling audio from {sample_rate} Hz to {self.target_sample_rate} Hz")
+                import torch
+                if isinstance(audio, torch.Tensor):
+                    audio = torchaudio.functional.resample(
+                        audio, orig_freq=sample_rate, new_freq=self.target_sample_rate
+                    )
+                else:
+                    # Convert to tensor, resample, then back to numpy if needed
+                    import numpy as np
+                    was_numpy = isinstance(audio, np.ndarray)
+                    if was_numpy:
+                        audio = torch.from_numpy(audio.copy())
+                    audio = torchaudio.functional.resample(
+                        audio, orig_freq=sample_rate, new_freq=self.target_sample_rate
+                    )
+                    if was_numpy:
+                        audio = audio.numpy()
+                sample_rate = self.target_sample_rate
+            else:
+                _logger.warning(f"Audio sample rate {sample_rate} Hz does not match target {self.target_sample_rate} Hz. Set auto_resample=True to automatically resample.")
+        
+        # Temporarily set target_sample_rate to current sample_rate for processing
+        self.target_sample_rate = sample_rate
+        
+        try:
+            # Process the audio
+            return self.encode_units(audio, channel_id=channel_id)
+        finally:
+            # Restore original target sample rate
+            self.target_sample_rate = original_target_sr
+
+    def encode_string_with_sr(self, audio, sample_rate, channel_id=None):
+        """
+        Tokenize audio array with explicit sample rate into string format.
+        
+        Args:
+            audio: Audio tensor/array
+            sample_rate: Sample rate of the audio  
+            channel_id: Channel to use for multi-channel audio
+        """
+        units = self.encode_units_with_sr(audio, sample_rate, channel_id)
+        return self.units2string(units)

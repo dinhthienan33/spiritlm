@@ -21,6 +21,11 @@ HIFIGAN_EXPRESSIVE_W2V2 = None
 def spiritlm_base(
     default_speaker=2,
     default_style=8,  # conv-default
+    target_sample_rate=None,  # None means use original sample rate
+    auto_resample=True,
+    preferred_channel=None,  # None, 0, 1, or 'average'
+    max_wav_chunk_seconds=6.25,
+    min_wav_chunk_ms=80,
 ):
     # Hubert
     global HUBERT
@@ -37,10 +42,23 @@ def spiritlm_base(
     return SpiritLMTokenizer(
         hubert_model=HUBERT,
         hifigan_model=HIFIGAN_BASE,
+        target_sample_rate=target_sample_rate,
+        auto_resample=auto_resample,
+        preferred_channel=preferred_channel,
+        max_wav_chunk_seconds=max_wav_chunk_seconds,
+        min_wav_chunk_ms=min_wav_chunk_ms,
     )
 
 
-def spiritlm_expressive(f0_backbone="fcpe", default_speaker=2):
+def spiritlm_expressive(
+    f0_backbone="fcpe", 
+    default_speaker=2,
+    target_sample_rate=None,  # None means use original sample rate
+    auto_resample=True,
+    preferred_channel=None,  # None, 0, 1, or 'average'
+    max_wav_chunk_seconds=6.25,
+    min_wav_chunk_ms=80,
+):
     # Hubert
     global HUBERT
     if HUBERT is None:
@@ -71,4 +89,9 @@ def spiritlm_expressive(f0_backbone="fcpe", default_speaker=2):
         hubert_key="hubert",
         pitch_key="pitch",
         style_key="style",
+        target_sample_rate=target_sample_rate,
+        auto_resample=auto_resample,
+        preferred_channel=preferred_channel,
+        max_wav_chunk_seconds=max_wav_chunk_seconds,
+        min_wav_chunk_ms=min_wav_chunk_ms,
     )

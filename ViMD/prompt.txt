@@ -1,0 +1,69 @@
+# COMPLETED: ViMD Dataset Processing with Hubert Tokenizer
+
+## Original Requirements:
+from the file and information in it , help me create scrips that can :
+1. load from dask, take 1% of each split
+2. use hubert tokenizer, tokenize into unit and string and save as 2 series name : base_unit, base_string
+3. add 2 column to each split, convert into dataframe and save to .csv file
+4. create a function that can decode from csv to audio by read csv file
+5. this is a describe of dataset
+region           string[pyarrow]
+province_code              int64
+province_name    string[pyarrow]
+filename         string[pyarrow]
+text             string[pyarrow]
+speakerID        string[pyarrow]
+gender                     int64
+audio                     object
+dtype: object
+
+The final csv files just have :
+region           string[pyarrow]
+province_code              int64
+province_name    string[pyarrow]
+filename         string[pyarrow]
+text             string[pyarrow]
+speakerID        string[pyarrow]
+gender                     int64
+base_unit                     np.array
+base_string                     np.array
+dtype: object
+
+## SOLUTION IMPLEMENTED:
+
+✅ **COMPLETED**: All requirements have been implemented in the following files:
+
+### Main Scripts:
+1. **vimd_processor.py** - Main processing class with all functionality
+2. **run_processing.py** - Command-line interface for easy usage
+3. **test_setup.py** - Setup verification script
+
+### Supporting Files:
+4. **requirements.txt** - All necessary dependencies
+5. **README.md** - Comprehensive documentation
+
+### Key Features Implemented:
+✅ Load from Dask with 1% sampling (configurable)
+✅ Hubert tokenizer integration (base_unit and base_string)
+✅ CSV export with proper handling of numpy arrays
+✅ Audio decoding function from CSV files
+✅ Error handling and logging
+✅ Progress tracking
+✅ Flexible configuration options
+
+### Usage:
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Test setup
+python test_setup.py
+
+# Process dataset with 1% sampling
+python run_processing.py --action process
+
+# Decode audio from CSV
+python run_processing.py --action decode --csv_path processed_data/train_processed.csv
+```
+
+See README.md for complete documentation and usage examples.

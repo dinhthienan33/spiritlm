@@ -1,0 +1,488 @@
+# SPIRIT-LM PROMPT TECHNIQUES AND SOURCES REFERENCE
+# Comprehensive Analysis of Prompting System in Meta's SpiritLM Codebase
+# ========================================================================
+
+## 1. OVERVIEW
+SpiritLM (Spoken and Written Language Model) is Meta's multimodal language model built on LLaMA-2 7B that seamlessly processes and generates both text and speech. The model uses a sophisticated prompting system with special tokens and unified tokenization.
+
+## 2. CORE PROMPT SYSTEM ARCHITECTURE
+
+### 2.1 Special Tokens and Prefixes
+**Source**: spiritlm/model/spiritlm_model.py:150-151
+
+```python
+class Spiritlm:
+    TEXT_PROMPT_PREFIX = "[Text]"
+    SPEECH_PROMPT_PREFIX = "[Speech]"
+```
+
+**Key Constants**:
+- TEXT_PROMPT_PREFIX: "[Text]" (Token ID: 32000)
+- SPEECH_PROMPT_PREFIX: "[Speech]" (Token ID: 32001)
+
+### 2.2 Unified Token Space Design
+The model operates in a unified token space combining:
+- **Text tokens**: Standard LLaMA vocabulary (0-31,999)
+- **Special tokens**: [Text] (32000), [Speech] (32001)
+- **Phonetic tokens**: [Hu0] to [Hu500] (32002-32502)
+- **Pitch tokens**: [Pi0] to [Pi63] (32503-32566) - Expressive only
+- **Style tokens**: [St0] to [St99] (32567-32666) - Expressive only
+
+## 3. PROMPT BUILDING MECHANISMS
+
+### 3.1 Core Prompt Builder
+**Source**: spiritlm/model/spiritlm_model.py:180-216
+
+```python
+def _build_prompt(self, generation_inputs: List[GenerationInput], output_modality: OutputModality) -> str:
+    """
+    Build the prompt according the input content and the output modality.
+    """
+    prompts = []
+    prev_modality = None
+    for gen_input in generation_inputs:
+        if gen_input.content_type.value == ContentType.SPEECH.value:
+            gen_input.content = convert_to_wav_tensor(gen_input.content)
+            if prev_modality != "s":
+                prompts.append(Spiritlm.SPEECH_PROMPT_PREFIX)
+            prompts.append(self.speech_tokenizer(gen_input.content))
+            prev_modality = "s"  # speech
+        elif gen_input.content_type.value == ContentType.TEXT.value:
+            if prev_modality != "t":
+                prompts.append(Spiritlm.TEXT_PROMPT_PREFIX)
+            prompts.append(gen_input.content)
+            prev_modality = "t"  # text
+    
+    # Add output modality prefix
+    if output_modality == OutputModality.TEXT:
+        if prev_modality != "t":
+            prompts.append(Spiritlm.TEXT_PROMPT_PREFIX)
+    elif output_modality == OutputModality.SPEECH:
+        if prev_modality != "s":
+            prompts.append(Spiritlm.SPEECH_PROMPT_PREFIX)
+    
+    return "".join(prompts)
+```
+
+**Key Features**:
+- Automatic modality switching detection
+- Only adds prefix when modality changes
+- Supports mixed text/speech inputs
+
+### 3.2 Utility Prompt Functions
+**Source**: spiritlm/eval/utils.py:11-17
+
+```python
+def wav_prompt(spiritlm_model: Spiritlm, wav_path: str) -> str:
+    wav = torchaudio.load(wav_path)[0].squeeze(0)
+    return spiritlm_model.SPEECH_PROMPT_PREFIX + spiritlm_model.speech_tokenizer(wav)
+
+def text_prompt(spiritlm_model: Spiritlm, text: str) -> str:
+    return spiritlm_model.TEXT_PROMPT_PREFIX + text
+```
+
+## 4. FEW-SHOT PROMPTING SYSTEM
+
+### 4.1 Few-Shot Template Architecture
+**Source**: spiritlm/eval/stsp/few_shot_prompt.py:16
+
+```python
+FEW_SHOT_TEMPLATE = "{prompt}{generation}"
+```
+
+### 4.2 Few-Shot Prompt Builder
+**Source**: spiritlm/eval/stsp/few_shot_prompt.py:35-101
+
+```python
+def build_few_shot_prompt(spiritlm_model: Spiritlm, input_output: str, n_shots: int = 3) -> str:
+    """
+    Build the few-shot prompt by simply concatenating a set of examples.
+    
+    E.g., a 3-shots T->S prompt would like this:
+    "[Text]text1[Speech]speech_tokens1\n[Text]text2[Speech]speech_tokens2\n[Text]text3[Speech]speech_tokens3\n"
+    """
+```
+
+**Supported Modality Combinations**:
+- text_text (T->T): Text to Text
+- speech_text (S->T): Speech to Text
+- text_speech (T->S): Text to Speech  
+- speech_speech (S->S): Speech to Speech
+
+**Example Few-Shot Prompt Format**:
+```
+[Text]Say hello in a happy voice[Speech][Hu234][Hu156]...[Pi12][St45]...
+[Text]Express sadness in your voice[Speech][Hu789][Hu123]...[Pi3][St78]...
+[Text]Speak with excitement[Speech][Hu456][Hu234]...[Pi56][St12]...
+```
+
+### 4.3 Sentiment-Balanced Sampling
+**Source**: spiritlm/eval/stsp/few_shot_prompt.py:52-54
+
+```python
+# ensure a balanced samples for each sentiment
+nb_samples_per_sentiment = math.ceil(n_shots / 3)
+df = df.groupby("sentiment").sample(n=nb_samples_per_sentiment)
+```
+
+## 5. PROMPT PROCESSING AND PARSING
+
+### 5.1 Speech Token Detection
+**Source**: spiritlm/model/utils.py:58-84
+
+```python
+def does_start_with_speech_token(encoded_string) -> bool:
+    if encoded_string is None or len(encoded_string) <= 4:  # shortest speech token is "[Hu1]"
+        return False
+    if encoded_string[0] != "[":
+        return False
+    # Check for Hu, Pi, St token patterns
+    if any(encoded_string[1:3].startswith(tok) for tok in ["Hu", "Pi", "St"]):
+        return True
+    return False
+
+def does_end_with_speech_token(encoded_string: str) -> bool:
+    # Similar logic for detecting speech tokens at end
+```
+
+### 5.2 Mixed Output Parsing
+**Source**: spiritlm/model/spiritlm_model.py:244-343
+
+```python
+def _parse_speech_and_text(self, generated_content: str):
+    """
+    Parse mixed text/speech output into segments
+    Returns: List of (content, modality_type) tuples
+    """
+    splits = []
+    text_prefix_length = len(Spiritlm.TEXT_PROMPT_PREFIX)
+    speech_prefix_length = len(Spiritlm.SPEECH_PROMPT_PREFIX)
+    
+    # Complex parsing logic to identify:
+    # - [Text] sections
+    # - [Speech] sections  
+    # - Speech tokens: [Hu###], [Pi###], [St###]
+```
+
+### 5.3 Prompt Position Finding
+**Source**: spiritlm/model/utils.py:17-30
+
+```python
+def find_prompt_last_speech_start_position(prompt: str) -> Optional[int]:
+    """Find the start position of the last speech segment in prompt"""
+    # Uses regex to find speech token patterns: [Hu###], [Pi###], [St###]
+    for match in re.finditer("(\]\d+uH\[)|(\]\d+iP\[)|(\]\d+tS\[)", prompt[::-1]):
+        # Returns position for continuation generation
+```
+
+## 6. GENERATION CONTROL AND CONSTRAINTS
+
+### 6.1 Token Filtering System
+**Source**: spiritlm/model/utils.py:97-126
+
+```python
+def get_forbidden_tokens(
+    ban_special_tokens: bool = True,
+    generate_only_speech: bool = False,
+    generate_only_text: bool = False,
+    ban_expressivity_tokens: bool = False,
+) -> List[int]:
+    """Control which tokens can be generated"""
+    forbidden_tokens = []
+    
+    if ban_special_tokens:
+        forbidden_tokens += [32000, 32001]  # [Text], [Speech]
+    
+    if generate_only_speech:
+        forbidden_tokens += list(range(32000))  # Ban all text tokens
+    
+    elif generate_only_text:
+        forbidden_tokens += list(range(32002, 32503))  # Ban speech tokens
+        
+    if ban_expressivity_tokens:
+        forbidden_tokens += list(range(32503, 32567))  # Ban pitch tokens
+        forbidden_tokens += list(range(32567, 32667))  # Ban style tokens
+    
+    return forbidden_tokens
+```
+
+### 6.2 Output Modality Control
+**Source**: spiritlm/model/spiritlm_model.py:218-243
+
+```python
+@cache
+def _build_forbidden_tokens(self, output_modality: OutputModality) -> List[int]:
+    """Build forbidden token list based on desired output modality"""
+    return get_forbidden_tokens(
+        generate_only_speech=(output_modality == OutputModality.SPEECH),
+        generate_only_text=(output_modality == OutputModality.TEXT),
+        ban_special_tokens=True,
+        ban_expressivity_tokens=(not self.is_expressive_model),
+    )
+```
+
+## 7. PRACTICAL USAGE PATTERNS
+
+### 7.1 Basic Generation Example
+**Source**: spiritlm/model/README.md:17-32
+
+```python
+# Text-only generation
+spirit_lm.generate(
+    output_modality=OutputModality.TEXT,
+    interleaved_inputs=[
+        GenerationInput(
+            content="The largest country in the world is",
+            content_type=ContentType.TEXT,
+        )
+    ],
+    generation_config=GenerationConfig(
+        temperature=0.9,
+        top_p=0.95,
+        max_new_tokens=50,
+        do_sample=True,
+    ),
+)
+```
+
+### 7.2 Speech Generation Example
+**Source**: spiritlm/model/README.md:36-53
+
+```python
+# Speech-only generation
+spirit_lm.generate(
+    output_modality=OutputModality.SPEECH,
+    interleaved_inputs=[
+        GenerationInput(
+            content="examples/audio/7143-88743-0029.flac",
+            content_type=ContentType.SPEECH,
+        )
+    ]
+)
+```
+
+### 7.3 Mixed Multimodal Generation
+**Source**: spiritlm/model/README.md:56-76
+
+```python
+# Arbitrary (mixed) generation
+spirit_lm.generate(
+    output_modality=OutputModality.ARBITRARY,
+    interleaved_inputs=[
+        GenerationInput(content="Hello", content_type=ContentType.TEXT),
+        GenerationInput(content="audio.wav", content_type=ContentType.SPEECH)
+    ]
+)
+```
+
+## 8. EVALUATION AND BENCHMARKING
+
+### 8.1 STSP (Speech-Text Sentiment Preservation) Framework
+**Source**: spiritlm/eval/stsp/predict_stsp.py:11-18
+
+```bash
+# Usage examples for different modality combinations:
+
+# Speech to Text
+torchrun --nnodes 1 --nproc-per-node 1 spiritlm/eval/stsp/predict_stsp.py \
+  --eval_manifest_path data/examples/ref.jsonl \
+  --eval --write_pred ./pred_s_t.jsonl \
+  --input_output speech_text
+
+# Text to Speech  
+torchrun --nnodes 1 --nproc-per-node 1 spiritlm/eval/stsp/predict_stsp.py \
+  --eval_manifest_path data/examples/ref.jsonl \
+  --eval --write_pred ./pred_t_s.jsonl \
+  --input_output text_speech
+```
+
+### 8.2 Evaluation Pipeline Integration
+**Source**: spiritlm/eval/stsp/predict_stsp.py:116-194
+
+```python
+def run(args):
+    # Load model
+    spiritlm_model = Spiritlm(args.model)
+    
+    # Build few-shot prompt if specified
+    if args.few_shot > 0:
+        prompt = build_few_shot_prompt(
+            spiritlm_model=spiritlm_model,
+            input_output=args.input_output,
+            n_shots=args.few_shot,
+        )
+    else:
+        prompt = None
+    
+    # Generate with retry logic
+    for i in range(NB_RETRIES):
+        try:
+            out: InterleavedOutputs = spiritlm_model.generate(
+                output_modality=output_modality,
+                interleaved_inputs=[GenerationInput(...)],
+                generation_config=GenerationConfig(
+                    temperature=0.8,
+                    top_p=0.95,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                ),
+                prompt=prompt,
+            )
+        except Exception as e:
+            # Retry logic for robust generation
+```
+
+## 9. SPEECH TOKENIZATION DETAILS
+
+### 9.1 Audio Processing Pipeline
+**Source**: spiritlm/model/utils.py:32-56
+
+```python
+def convert_to_wav_tensor(content: Union[str, os.PathLike, torch.Tensor, np.ndarray]) -> torch.Tensor:
+    """Convert various audio input formats to standardized tensor"""
+    if isinstance(content, (os.PathLike, str)):
+        wav, sr = torchaudio.load(audio_path)
+        if sr != EXPECTED_SAMPLING_RATE:  # 16kHz expected
+            wav = torchaudio.functional.resample(wav, orig_freq=sr, new_freq=EXPECTED_SAMPLING_RATE)
+    # Handle other input types...
+    return wav.squeeze()
+```
+
+### 9.2 Speech Token Encoding
+**Source**: spiritlm/speech_tokenizer/spiritlm_tokenizer.py:282-289
+
+The speech tokenizer converts audio to string format like:
+```
+"[Hu234][Hu156][Hu789][Pi12][St45]..."
+```
+
+Where:
+- [Hu###]: HuBERT phonetic tokens (0-500)
+- [Pi###]: Pitch/F0 tokens (0-63) - Expressive model only
+- [St###]: Style tokens (0-99) - Expressive model only
+
+## 10. MODEL VARIANTS AND CAPABILITIES
+
+### 10.1 Base vs Expressive Models
+**Source**: spiritlm/model/spiritlm_model.py:171-179
+
+```python
+if model_name == SpiritlmVariants.BASE_7B.value:
+    self.speech_tokenizer = spiritlm_base(**speech_tokenizer_kwargs)
+    self.is_expressive_model = False
+elif model_name == SpiritlmVariants.EXPRESSIVIE_7B.value:
+    self.speech_tokenizer = spiritlm_expressive(**speech_tokenizer_kwargs)
+    self.is_expressive_model = True
+```
+
+**Differences**:
+- **Base Model**: Only phonetic tokens (HuBERT)
+- **Expressive Model**: Phonetic + Pitch + Style tokens
+
+### 10.2 Model Loading Patterns
+**Source**: spiritlm/model/spiritlm_model.py:155-180
+
+```python
+# Load by name
+spirit_lm = Spiritlm("spirit-lm-base-7b")
+spirit_lm = Spiritlm("spirit-lm-expressive-7b")
+
+# Load by path
+spirit_lm = Spiritlm("/path/to/model/directory")
+```
+
+## 11. ADVANCED PROMPTING TECHNIQUES
+
+### 11.1 Continuation Generation
+For speech continuation, the model can:
+1. Detect if prompt ends with speech tokens
+2. Find the last speech segment start position  
+3. Continue generating from that position
+4. Preserve pitch and style characteristics
+
+### 11.2 Sentiment and Emotion Control
+The few-shot system supports:
+- Balanced sentiment sampling (positive, negative, neutral)
+- Emotion-aware speech generation
+- Cross-modal sentiment preservation
+
+### 11.3 Speaker Control
+**Source**: Multiple files show speaker_id parameter:
+```python
+speaker_id: int = 2  # Default speaker (0, 1, 2, or 3 available)
+```
+
+## 12. ERROR HANDLING AND ROBUSTNESS
+
+### 12.1 Generation Retry Logic
+**Source**: spiritlm/eval/stsp/predict_stsp.py:150-171
+
+```python
+NB_RETRIES = 3
+for i in range(NB_RETRIES):
+    try:
+        out = spiritlm_model.generate(...)
+    except Exception as e:
+        print(f"Got an exception when generating: {e}")
+        if i == NB_RETRIES - 1:
+            raise Exception(f"Failed to generate after {NB_RETRIES}")
+    else:
+        break
+```
+
+### 12.2 Content Validation
+The system includes validation for:
+- Minimum speech token requirements (>= 25 tokens for meaningful speech)
+- Content type matching
+- Audio format standardization (16kHz)
+
+## 13. PERFORMANCE CONSIDERATIONS
+
+### 13.1 Computational Requirements
+- **Model Size**: 7B parameters (LLaMA-2 base)
+- **Additional Components**: ~195M parameters (speech tokenizers + decoders)
+- **Memory**: Requires significant GPU memory for inference
+- **Recommended**: A100-80GB or similar high-memory GPUs
+
+### 13.2 Generation Parameters
+**Common Settings**:
+```python
+generation_config = GenerationConfig(
+    temperature=0.8,
+    top_p=0.95,
+    max_new_tokens=300,  # 300 for speech, 50 for text
+    do_sample=True,
+)
+```
+
+## 14. SUMMARY
+
+The SpiritLM prompting system is a sophisticated multimodal framework that:
+
+1. **Unifies Text and Speech**: Uses special tokens [Text] and [Speech] for seamless modality switching
+2. **Supports Few-Shot Learning**: Builds example-based prompts for cross-modal tasks  
+3. **Preserves Expressivity**: Maintains emotional and stylistic characteristics across modalities
+4. **Enables Fine-Grained Control**: Offers multiple generation modes and token filtering
+5. **Handles Complex Scenarios**: Supports mixed input/output and continuation generation
+
+The system represents a significant advance in multimodal language modeling, enabling natural interaction between spoken and written language in a single unified model.
+
+## 15. KEY SOURCE FILES REFERENCE
+
+**Core Model Files**:
+- spiritlm/model/spiritlm_model.py - Main model and generation logic
+- spiritlm/model/utils.py - Utility functions for token processing
+- spiritlm/model/README.md - Usage examples and API documentation
+
+**Prompting System Files**:  
+- spiritlm/eval/stsp/few_shot_prompt.py - Few-shot prompt construction
+- spiritlm/eval/utils.py - Basic prompt utility functions
+- spiritlm/eval/stsp/predict_stsp.py - Evaluation and prediction pipeline
+
+**Documentation Files**:
+- README.md - Project overview
+- MODEL_CARD.md - Detailed model specifications  
+- workflow.md - Complete system architecture
+- spiritlm/eval/README.md - Evaluation framework documentation
+
+This comprehensive analysis covers all prompt-related techniques, sources, and processing mechanisms found in the SpiritLM codebase. 

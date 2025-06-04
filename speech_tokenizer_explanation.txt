@@ -1,0 +1,258 @@
+SpiritLM Speech Tokenizer: Audio-to-Vector Conversion Methods
+================================================================
+
+OVERVIEW
+========
+The SpiritLM speech tokenizer is a sophisticated system that converts raw audio waveforms into discrete vector representations (tokens) that can be processed by language models. The system supports two main modes:
+
+1. **Base Mode**: Uses only Hubert units for speech representation
+2. **Expressive Mode**: Adds pitch and style information for more expressive speech synthesis
+
+ARCHITECTURE COMPONENTS
+=====================
+
+1. HuBERT Model (Core Speech Representation)
+-------------------------------------------
+- **Purpose**: Extracts semantic and acoustic features from audio
+- **Model**: mHuBERT base model operating at 25Hz frame rate
+- **Process**:
+  * Takes raw 16kHz audio input
+  * Applies convolutional feature extraction layers
+  * Extracts features from layer 11 (hubert_layer=11)
+  * Produces dense feature representations at 25Hz (640 sample hop size)
+
+2. Quantizer (Vector Quantization)
+---------------------------------
+- **Purpose**: Converts continuous HuBERT features to discrete tokens
+- **Method**: Linear quantizer with 500 clusters (K-means based)
+- **Output**: Integer tokens in range 0-499 representing speech units
+
+3. Pitch/F0 Model (Expressive Mode Only)
+---------------------------------------
+- **Purpose**: Extracts fundamental frequency (pitch) information
+- **Method**: FCPE (Fundamental Frequency Contour and Periodicity Estimation)
+- **Rate**: 12.5Hz (interpolated from raw F0 extraction)
+- **Quantization**: VQ-VAE based quantizer for discrete pitch tokens
+- **Process**:
+  * Extracts continuous F0 contour from audio
+  * Interpolates missing values (unvoiced regions)
+  * Quantizes to discrete pitch tokens
+
+4. Style Encoder (Expressive Mode Only)
+--------------------------------------
+- **Purpose**: Captures speaker and speaking style characteristics
+- **Model**: Wav2Vec2-based style encoder
+- **Rate**: 1Hz (one style token per second of audio)
+- **Output**: Style tokens representing speaker identity and prosodic patterns
+
+TOKENIZATION PIPELINE
+====================
+
+Step 1: Audio Preprocessing
+---------------------------
+```
+Input: Raw audio file (any format/sample rate)
+↓
+Load audio using torchaudio.load()
+↓
+Resample to 16kHz if necessary
+↓
+Convert stereo to mono (average channels or select one)
+↓
+Ensure single channel waveform: shape [T]
+```
+
+Step 2: Chunked Processing
+-------------------------
+```
+Audio Length Check:
+- Minimum chunk: 1280 samples (80ms) - required for pitch extraction
+- Maximum chunk: 1,600,000 samples (100 seconds) - memory optimization
+↓
+Process audio in overlapping chunks to handle long files
+```
+
+Step 3: Feature Extraction (Parallel Processing)
+-----------------------------------------------
+
+**HuBERT Feature Extraction:**
+```
+Raw Audio [16kHz] 
+↓
+Convolutional Feature Layers (stride-based downsampling)
+↓ 
+HuBERT Transformer Layers (up to layer 11)
+↓
+Dense Features [B, T_25Hz, D] where T_25Hz = T_audio / 640
+↓
+Linear Quantizer (K-means clustering)
+↓
+HuBERT Tokens [0-499] at 25Hz rate
+```
+
+**Pitch Feature Extraction (if expressive mode):**
+```
+Raw Audio [16kHz]
+↓
+FCPE F0 Extractor
+↓
+Continuous F0 contour
+↓
+Interpolation for unvoiced regions
+↓
+Downsampling/upsampling to 12.5Hz
+↓
+VQ-VAE Quantizer
+↓
+Pitch Tokens at 12.5Hz rate
+```
+
+**Style Feature Extraction (if expressive mode):**
+```
+Raw Audio [16kHz]
+↓
+Wav2Vec2 Style Encoder
+↓
+Style embeddings per second
+↓
+Style Tokens at 1Hz rate
+```
+
+Step 4: Token Synchronization and Formatting
+------------------------------------------
+
+**Units Dictionary Format:**
+```python
+{
+    'hubert': '78 42 81 159 316 259',      # Space-separated token IDs
+    'pitch': '13 13 13 13 13 3',           # (expressive mode only)
+    'style': '81 81 81 81 81 81'           # (expressive mode only)
+}
+```
+
+**String Token Format (Time-Ordered):**
+```
+Time-based interleaving:
+- Calculate timestamp for each token based on its rate
+- Sort all tokens by timestamp
+- Format as: '[St81][Hu78][Pi13][Hu42][Hu81][Hu159][Hu316][Pi3][Hu259]'
+
+Where:
+- [Hu*] = HuBERT tokens (25Hz)
+- [Pi*] = Pitch tokens (12.5Hz) 
+- [St*] = Style tokens (1Hz)
+```
+
+DEDUPLICATION STRATEGIES
+=======================
+
+1. **HuBERT Deduplication** (Default: True)
+   - Removes consecutive identical HuBERT tokens
+   - Reduces redundancy in stable speech regions
+
+2. **Pitch Deduplication** (Default: True)
+   - Removes consecutive identical pitch tokens
+   - Smooths pitch contours
+
+3. **Style Deduplication** (Default: False)
+   - Style tokens typically don't repeat consecutively
+   - Usually one style per second
+
+DECODING PROCESS (Vector-to-Audio)
+=================================
+
+Step 1: Token Parsing
+--------------------
+```
+Input: Token string '[St81][Hu78][Pi13][Hu42]...'
+↓
+Parse into separate token streams:
+- HuBERT: [78, 42, 81, ...]
+- Pitch: [13, 13, 13, ...]
+- Style: [81, 81, 81, ...]
+```
+
+Step 2: Token Alignment
+----------------------
+```
+Duplicate tokens to match HuBERT length:
+- HuBERT tokens: 1:1 mapping
+- Pitch tokens: Repeat to match HuBERT frame count
+- Style tokens: Broadcast across all frames
+```
+
+Step 3: Neural Vocoding (HiFiGAN)
+--------------------------------
+```
+HuBERT Tokens → HiFiGAN Generator → Raw Audio
+Additional inputs:
+- Pitch codes (for F0 conditioning)
+- Style codes (for speaker/style conditioning)
+- Speaker ID (for multi-speaker models)
+- Duration prediction (optional)
+```
+
+KEY TECHNICAL DETAILS
+====================
+
+**Frame Rates and Synchronization:**
+- Audio sample rate: 16,000 Hz
+- HuBERT rate: 25 Hz (25 tokens per second)
+- Pitch rate: 12.5 Hz (12.5 tokens per second)  
+- Style rate: 1 Hz (1 token per second)
+- HuBERT hop size: 640 samples (40ms frames)
+
+**Memory Optimization:**
+- Chunked processing for long audio files
+- Maximum chunk size: 100 seconds
+- Minimum chunk size: 80ms (1280 samples)
+- Gradient computation disabled during inference
+
+**Model Checkpoints:**
+- HuBERT: mhubert_base_25hz.pt
+- HuBERT Quantizer: L11_quantizer_500.pt (500 clusters)
+- Pitch VQ-VAE: vqvae_f0_quantizer/model.pt
+- Style Encoder: style_encoder_w2v2/
+- HiFiGAN Vocoder: Various configurations for base/expressive modes
+
+USAGE PATTERNS
+==============
+
+**Basic Tokenization:**
+```python
+tokenizer = spiritlm_base()
+units = tokenizer.encode_units("audio.wav")
+# Returns: {'hubert': '78 42 81 159 ...'}
+
+string_tokens = tokenizer.encode_string("audio.wav") 
+# Returns: '[Hu78][Hu42][Hu81][Hu159]...'
+```
+
+**Expressive Tokenization:**
+```python
+tokenizer = spiritlm_expressive()
+units = tokenizer.encode_units("audio.wav")
+# Returns: {
+#   'hubert': '78 42 81 159 ...',
+#   'pitch': '13 13 13 13 ...',
+#   'style': '81 81 81 81 ...'
+# }
+```
+
+**Audio Synthesis:**
+```python
+reconstructed_audio = tokenizer.decode(units, speaker_id=2)
+# Returns: numpy array of 16kHz audio samples
+```
+
+ADVANTAGES OF THIS APPROACH
+===========================
+
+1. **Discrete Representation**: Enables language model processing of speech
+2. **Multi-rate Design**: Captures different aspects at appropriate time scales
+3. **Semantic Preservation**: HuBERT tokens maintain speech content
+4. **Prosodic Control**: Separate pitch and style tokens enable fine-grained control
+5. **Scalability**: Chunked processing handles arbitrary-length audio
+6. **Efficiency**: Vector quantization dramatically reduces data size vs. raw audio
+
+This tokenization scheme enables SpiritLM to process speech as discrete tokens while preserving both semantic content and prosodic characteristics necessary for natural speech generation. 
