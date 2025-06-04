@@ -25,6 +25,28 @@ SPIRITLM_MODEL_DIR = BASE_CHECKPOINTS_DIR / "spiritlm_model"
 SPEECH_TOKENIZER_DIR = BASE_CHECKPOINTS_DIR / "speech_tokenizer"
 
 
+def set_global_checkpoint_dir(checkpoint_dir):
+    """
+    Set the global checkpoint directory and update all derived paths.
+    
+    Args:
+        checkpoint_dir (str or Path): Path to the checkpoint directory
+    """
+    global BASE_CHECKPOINTS_DIR, SPIRITLM_MODEL_DIR, SPEECH_TOKENIZER_DIR
+    
+    BASE_CHECKPOINTS_DIR = Path(checkpoint_dir)
+    SPIRITLM_MODEL_DIR = BASE_CHECKPOINTS_DIR / "spiritlm_model"
+    SPEECH_TOKENIZER_DIR = BASE_CHECKPOINTS_DIR / "speech_tokenizer"
+    
+    # Also set the environment variable for consistency
+    os.environ['SPIRITLM_CHECKPOINTS_DIR'] = str(BASE_CHECKPOINTS_DIR)
+    
+    # Override checkpoint directories in other modules
+    override_checkpoint_dirs()
+    
+    print(f"✓ Global checkpoint directory set to: {BASE_CHECKPOINTS_DIR}")
+
+
 def override_checkpoint_dirs():
     """
     Automatically override base_checkpoints_dir variables in ALL loaded modules.
