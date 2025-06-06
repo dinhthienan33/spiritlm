@@ -1,0 +1,40 @@
+# Vietnamese Speech Tokenizer Training Configuration
+
+# Data Configuration
+data_dir: "/path/to/vietnamese/speech/dataset"  # Update this path
+val_data_dir: null  # If null, will split from train data
+sample_rate: 16000
+max_audio_duration: 10.0  # Maximum audio length in seconds
+min_audio_duration: 1.0   # Minimum audio length in seconds
+
+# Model Configuration
+pretrained_checkpoint_dir: "/kaggle/input/spiritlm-andinh"  # Path to pretrained models
+train_quantizer: true      # Fine-tune the quantizer layer
+train_hifigan: false       # Start with quantizer only (HiFiGAN training is more complex)
+
+# Training Configuration
+batch_size: 8              # Reduce if you have memory issues
+num_epochs: 20
+learning_rate: 0.0001
+weight_decay: 0.000001
+reconstruction_weight: 1.0
+
+# System Configuration
+num_workers: 4             # Number of data loader workers
+output_dir: "./vietnamese_tokenizer"
+
+# Logging Configuration
+log_interval: 100
+save_interval: 5
+
+# Advanced Training Options (optional)
+gradient_clip_norm: 1.0
+warmup_epochs: 2
+use_mixed_precision: true   # Use FP16 training if available
+
+# Data Augmentation (optional)
+augmentation:
+  noise_prob: 0.1          # Probability of adding noise
+  noise_level: 0.01        # Noise level
+  speed_perturb: true      # Speed perturbation
+  speed_range: [0.9, 1.1]  # Speed range for perturbation 
